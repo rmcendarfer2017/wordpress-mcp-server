@@ -6,8 +6,10 @@ A Machine Communication Protocol (MCP) server that allows publishing content to 
 
 - Publish articles to WordPress
 - Test WordPress connection
-- Retrieve WordPress categories and tags
+- Create, retrieve, and manage WordPress categories and tags
+- Automatically handle category and tag creation when publishing
 - Works as both standalone FastAPI server and MCP server
+- Environment variable support for WordPress credentials
 
 ## Setup
 
@@ -55,7 +57,31 @@ The API will be available at http://localhost:8000
 
 ## MCP Tools
 
-- `PUBLISH_ARTICLE` - Publish an article to WordPress
+- `PUBLISH_ARTICLE` - Publish an article to WordPress with category and tag IDs
+- `PREPARE_ARTICLE_METADATA` - Check for existing categories and tags, create them if they don't exist, and return their IDs
 - `TEST_CONNECTION` - Test connection to WordPress site
-- `GET_CATEGORIES` - Get list of categories from WordPress site
-- `GET_TAGS` - Get list of tags from WordPress site
+
+## Category and Tag Management
+
+The WordPress MCP Server now supports advanced category and tag management:
+
+### Using PREPARE_ARTICLE_METADATA
+
+This tool allows you to:
+1. Check if categories and tags exist on your WordPress site
+2. Automatically create any categories or tags that don't exist
+3. Return the IDs of all categories and tags for use with PUBLISH_ARTICLE
+
+Example workflow:
+1. Call PREPARE_ARTICLE_METADATA with category and tag names
+2. Get back the corresponding IDs
+3. Use those IDs with PUBLISH_ARTICLE to publish your content
+
+### Environment Variable Support
+
+All tools now support using environment variables from your `.env` file as defaults:
+- `WP_SITE_URL` - Your WordPress site URL
+- `WP_USERNAME` - Your WordPress username
+- `WP_PASSWORD` - Your WordPress application password
+
+This means you can call the tools without explicitly providing these parameters if they're set in your environment.

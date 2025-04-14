@@ -1,16 +1,21 @@
 import os
-import base64
-import json
-import asyncio
 import sys
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query
+import json
+import base64
+import asyncio
+import logging
+import traceback
+from typing import Optional, List, Dict, Any, Union
+from enum import Enum
+
+import requests
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Depends, Header, Query
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import requests
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
 # Initialize FastAPI app
@@ -199,8 +204,8 @@ async def publish_article(
     content: str = Form(...),
     excerpt: Optional[str] = Form(None),
     status: str = Form("draft"),
-    categories: str = Form("[]"),  # JSON string of category names
-    tags: str = Form("[]"),  # JSON string of tag names
+    categories: str = Form("[]"),  # JSON string of category IDs
+    tags: str = Form("[]"),  # JSON string of tag IDs
     image: Optional[UploadFile] = File(None),
     site_url: str = Form(os.getenv("WP_SITE_URL", "")),
     username: str = Form(os.getenv("WP_USERNAME", "")),
@@ -209,146 +214,24 @@ async def publish_article(
     """
     Publish an article to WordPress with optional image, categories, and tags
     """
-    # Parse JSON strings
+    # Parse inputs
     try:
         categories_list = json.loads(categories)
         tags_list = json.loads(tags)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON format for categories or tags")
     
-    # Create WordPress config
+    # Set up WordPress connection
     config = WordPressConfig(site_url=site_url, username=username, password=password)
-    
-    # Set up authentication headers
     headers = get_wp_auth(config)
-    headers["Content-Type"] = "application/json"
     
-    # STEP 1: Get all existing categories from WordPress
-    all_categories_url = f"{config.site_url}/wp-json/wp/v2/categories?per_page=100"
-    all_categories_response = requests.get(all_categories_url, headers=headers)
-    
-    all_categories = []
-    if all_categories_response.status_code == 200:
-        all_categories = all_categories_response.json()
-    else:
-        raise HTTPException(status_code=all_categories_response.status_code, 
-                           detail=f"Failed to fetch categories: {all_categories_response.text}")
-    
-    # STEP 2: Get all existing tags from WordPress
-    all_tags_url = f"{config.site_url}/wp-json/wp/v2/tags?per_page=100"
-    all_tags_response = requests.get(all_tags_url, headers=headers)
-    
-    all_tags = []
-    if all_tags_response.status_code == 200:
-        all_tags = all_tags_response.json()
-    else:
-        raise HTTPException(status_code=all_tags_response.status_code, 
-                           detail=f"Failed to fetch tags: {all_tags_response.text}")
-    
-    # STEP 3: Process categories - find or create
-    category_ids = []
-    for category_name in categories_list:
-        if category_name and category_name.strip():  # Skip empty category names
-            try:
-                # First check if category exists in all categories
-                category_id = None
-                for cat in all_categories:
-                    if cat["name"].lower() == category_name.lower():
-                        category_id = cat["id"]
-                        break
-                
-                # If not found, try search endpoint
-                if not category_id:
-                    search_url = f"{config.site_url}/wp-json/wp/v2/categories?search={category_name}"
-                    search_response = requests.get(search_url, headers=headers)
-                    
-                    if search_response.status_code == 200:
-                        search_results = search_response.json()
-                        
-                        # Look for exact match (case insensitive)
-                        for cat in search_results:
-                            if cat["name"].lower() == category_name.lower():
-                                category_id = cat["id"]
-                                break
-                
-                # If still not found, create new category
-                if not category_id:
-                    category_data = {
-                        "name": category_name,
-                        "slug": category_name.lower().replace(" ", "-"),
-                        "description": f"Category for {category_name}"
-                    }
-                    create_url = f"{config.site_url}/wp-json/wp/v2/categories"
-                    create_response = requests.post(create_url, headers=headers, json=category_data)
-                    
-                    if create_response.status_code != 201:
-                        raise HTTPException(status_code=create_response.status_code, 
-                                          detail=f"Failed to create category: {create_response.text}")
-                    
-                    category_id = create_response.json().get("id")
-                
-                # Add category ID to list
-                if category_id:
-                    category_ids.append(category_id)
-                
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Error processing category {category_name}: {str(e)}")
-    
-    # STEP 4: Process tags - find or create
-    tag_ids = []
-    for tag_name in tags_list:
-        if tag_name and tag_name.strip():  # Skip empty tag names
-            try:
-                # First check if tag exists in all tags
-                tag_id = None
-                for tag in all_tags:
-                    if tag["name"].lower() == tag_name.lower():
-                        tag_id = tag["id"]
-                        break
-                
-                # If not found, try search endpoint
-                if not tag_id:
-                    search_url = f"{config.site_url}/wp-json/wp/v2/tags?search={tag_name}"
-                    search_response = requests.get(search_url, headers=headers)
-                    
-                    if search_response.status_code == 200:
-                        search_results = search_response.json()
-                        
-                        # Look for exact match (case insensitive)
-                        for tag in search_results:
-                            if tag["name"].lower() == tag_name.lower():
-                                tag_id = tag["id"]
-                                break
-                
-                # If still not found, create new tag
-                if not tag_id:
-                    tag_data = {
-                        "name": tag_name,
-                        "slug": tag_name.lower().replace(" ", "-")
-                    }
-                    create_url = f"{config.site_url}/wp-json/wp/v2/tags"
-                    create_response = requests.post(create_url, headers=headers, json=tag_data)
-                    
-                    if create_response.status_code != 201:
-                        raise HTTPException(status_code=create_response.status_code, 
-                                          detail=f"Failed to create tag: {create_response.text}")
-                    
-                    tag_id = create_response.json().get("id")
-                
-                # Add tag ID to list
-                if tag_id:
-                    tag_ids.append(tag_id)
-                
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Error processing tag {tag_name}: {str(e)}")
-    
-    # STEP 5: Upload image if provided
+    # Upload image if provided
     featured_media_id = None
     if image:
         image_data = await image.read()
         featured_media_id = upload_media_to_wordpress(image_data, image.filename, config)
     
-    # STEP 6: Create article payload WITH the category and tag IDs we obtained
+    # Create article payload
     article_data = {
         "title": title,
         "content": content,
@@ -357,14 +240,14 @@ async def publish_article(
     
     if excerpt:
         article_data["excerpt"] = excerpt
-    if category_ids:
-        article_data["categories"] = category_ids
-    if tag_ids:
-        article_data["tags"] = tag_ids
+    if categories_list:
+        article_data["categories"] = categories_list
+    if tags_list:
+        article_data["tags"] = tags_list
     if featured_media_id:
         article_data["featured_media"] = featured_media_id
     
-    # STEP 7: Publish article with all data in a single request
+    # Publish article with all data in a single request
     posts_url = f"{config.site_url}/wp-json/wp/v2/posts"
     response = requests.post(posts_url, headers=headers, json=article_data)
     
@@ -415,19 +298,42 @@ try:
                         },
                         "categories": {
                             "type": "array",
-                            "description": "List of category IDs to assign to the article",
+                            "description": "List of category IDs (integers). Use PREPARE_ARTICLE_METADATA to get IDs.",
                             "items": {"type": "integer"}
                         },
                         "tags": {
                             "type": "array",
-                            "description": "List of tag IDs to assign to the article",
+                            "description": "List of tag IDs (integers). Use PREPARE_ARTICLE_METADATA to get IDs.",
                             "items": {"type": "integer"}
                         },
-                        "site_url": {"type": "string", "description": "WordPress site URL"},
-                        "username": {"type": "string", "description": "WordPress username"},
-                        "password": {"type": "string", "description": "WordPress application password"}
+                        "site_url": {"type": "string", "description": f"WordPress site URL (default: {os.getenv('WP_SITE_URL', '')})"},
+                        "username": {"type": "string", "description": f"WordPress username (default: {os.getenv('WP_USERNAME', '')})"},
+                        "password": {"type": "string", "description": f"WordPress application password (default: {os.getenv('WP_PASSWORD', '')})"}
                     },
-                    "required": ["title", "content", "site_url", "username", "password"],
+                    "required": ["title", "content"],
+                },
+            ),
+            types.Tool(
+                name="PREPARE_ARTICLE_METADATA",
+                description="Check for existing categories and tags, create them if they don't exist, and return their IDs",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "categories": {
+                            "type": "array",
+                            "description": "List of category names (strings) to check or create",
+                            "items": {"type": "string"}
+                        },
+                        "tags": {
+                            "type": "array",
+                            "description": "List of tag names (strings) to check or create",
+                            "items": {"type": "string"}
+                        },
+                        "site_url": {"type": "string", "description": f"WordPress site URL (default: {os.getenv('WP_SITE_URL', '')})"},
+                        "username": {"type": "string", "description": f"WordPress username (default: {os.getenv('WP_USERNAME', '')})"},
+                        "password": {"type": "string", "description": f"WordPress application password (default: {os.getenv('WP_PASSWORD', '')})"}
+                    },
+                    "required": [],
                 },
             ),
             types.Tool(
@@ -436,11 +342,11 @@ try:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "site_url": {"type": "string", "description": "WordPress site URL"},
-                        "username": {"type": "string", "description": "WordPress username"},
-                        "password": {"type": "string", "description": "WordPress application password"}
+                        "site_url": {"type": "string", "description": f"WordPress site URL (default: {os.getenv('WP_SITE_URL', '')})"},
+                        "username": {"type": "string", "description": f"WordPress username (default: {os.getenv('WP_USERNAME', '')})"},
+                        "password": {"type": "string", "description": f"WordPress application password (default: {os.getenv('WP_PASSWORD', '')})"}
                     },
-                    "required": ["site_url", "username", "password"],
+                    "required": [],
                 },
             ),
         ]
@@ -457,17 +363,24 @@ try:
                 content = arguments.get("content")
                 excerpt = arguments.get("excerpt")
                 status = arguments.get("status", "draft")
-                categories = arguments.get("categories", [])
-                tags = arguments.get("tags", [])
-                site_url = arguments.get("site_url")
-                username = arguments.get("username")
-                password = arguments.get("password")
+                categories_input = arguments.get("categories", [])
+                tags_input = arguments.get("tags", [])
+                site_url = arguments.get("site_url", os.getenv("WP_SITE_URL", ""))
+                username = arguments.get("username", os.getenv("WP_USERNAME", ""))
+                password = arguments.get("password", os.getenv("WP_PASSWORD", ""))
                 
                 # Create config
                 config = WordPressConfig(site_url=site_url, username=username, password=password)
                 
                 # Get authentication headers
                 headers = get_wp_auth(config)
+                
+                # Upload image if provided
+                featured_media_id = None
+                if "image" in arguments and arguments["image"]:
+                    image_data = arguments["image"]
+                    image_name = arguments.get("image_name", "image.jpg")
+                    featured_media_id = upload_media_to_wordpress(image_data, image_name, config)
                 
                 # Create article payload
                 article_data = {
@@ -478,10 +391,12 @@ try:
                 
                 if excerpt:
                     article_data["excerpt"] = excerpt
-                if categories:
-                    article_data["categories"] = categories
-                if tags:
-                    article_data["tags"] = tags
+                if categories_input:
+                    article_data["categories"] = categories_input
+                if tags_input:
+                    article_data["tags"] = tags_input
+                if featured_media_id:
+                    article_data["featured_media"] = featured_media_id
                 
                 # Publish article
                 posts_url = f"{config.site_url}/wp-json/wp/v2/posts"
@@ -502,38 +417,148 @@ try:
                     ))
                     
             except Exception as e:
+                import traceback
                 resources.append(types.TextContent(
                     type="text",
-                    text=f"Error publishing article: {str(e)}"
+                    text=f"Error publishing article: {str(e)}\n\n{traceback.format_exc()}"
                 ))
                 
-        elif name == "TEST_CONNECTION":
+        elif name == "PREPARE_ARTICLE_METADATA":
             try:
                 # Extract parameters
-                site_url = arguments.get("site_url")
-                username = arguments.get("username")
-                password = arguments.get("password")
+                categories_input = arguments.get("categories", [])
+                tags_input = arguments.get("tags", [])
+                site_url = arguments.get("site_url", os.getenv("WP_SITE_URL", ""))
+                username = arguments.get("username", os.getenv("WP_USERNAME", ""))
+                password = arguments.get("password", os.getenv("WP_PASSWORD", ""))
                 
                 # Create config
                 config = WordPressConfig(site_url=site_url, username=username, password=password)
                 
-                # Test connection
+                # Get authentication headers
                 headers = get_wp_auth(config)
-                url = f"{config.site_url}/wp-json/wp/v2/users/me"
                 
-                response = requests.get(url, headers=headers)
+                # Get all categories
+                categories_url = f"{config.site_url}/wp-json/wp/v2/categories?per_page=100"
+                categories_response = requests.get(categories_url, headers=headers)
+                all_categories = categories_response.json() if categories_response.status_code == 200 else []
+                
+                # Get all tags
+                tags_url = f"{config.site_url}/wp-json/wp/v2/tags?per_page=100"
+                tags_response = requests.get(tags_url, headers=headers)
+                all_tags = tags_response.json() if tags_response.status_code == 200 else []
+                
+                # Process categories - find or create
+                category_ids = []
+                for category_item in categories_input:
+                    category_id = None
+                    for cat in all_categories:
+                        if cat["name"].lower() == category_item.lower():
+                            category_id = cat["id"]
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Found existing category '{category_item}' with ID {category_id}"
+                            ))
+                            break
+                    
+                    if not category_id:
+                        # Create new category
+                        category_data = {
+                            "name": category_item,
+                            "slug": category_item.lower().replace(" ", "-")
+                        }
+                        create_url = f"{config.site_url}/wp-json/wp/v2/categories"
+                        create_response = requests.post(create_url, headers=headers, json=category_data)
+                        
+                        if create_response.status_code == 201:
+                            category_id = create_response.json().get("id")
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Created new category '{category_item}' with ID {category_id}"
+                            ))
+                        else:
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Failed to create category: {create_response.text}"
+                            ))
+                    
+                    if category_id:
+                        category_ids.append(category_id)
+                
+                # Process tags - find or create
+                tag_ids = []
+                for tag_item in tags_input:
+                    tag_id = None
+                    for tag in all_tags:
+                        if tag["name"].lower() == tag_item.lower():
+                            tag_id = tag["id"]
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Found existing tag '{tag_item}' with ID {tag_id}"
+                            ))
+                            break
+                    
+                    if not tag_id:
+                        # Create new tag
+                        tag_data = {
+                            "name": tag_item,
+                            "slug": tag_item.lower().replace(" ", "-")
+                        }
+                        create_url = f"{config.site_url}/wp-json/wp/v2/tags"
+                        create_response = requests.post(create_url, headers=headers, json=tag_data)
+                        
+                        if create_response.status_code == 201:
+                            tag_id = create_response.json().get("id")
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Created new tag '{tag_item}' with ID {tag_id}"
+                            ))
+                        else:
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Failed to create tag: {create_response.text}"
+                            ))
+                    
+                    if tag_id:
+                        tag_ids.append(tag_id)
+                
+                resources.append(types.TextContent(
+                    type="text",
+                    text=f"Categories: {category_ids}\nTags: {tag_ids}"
+                ))
+            except Exception as e:
+                resources.append(types.TextContent(
+                    type="text",
+                    text=f"Error preparing article metadata: {str(e)}"
+                ))
+        elif name == "TEST_CONNECTION":
+            try:
+                # Extract parameters
+                site_url = arguments.get("site_url", os.getenv("WP_SITE_URL", ""))
+                username = arguments.get("username", os.getenv("WP_USERNAME", ""))
+                password = arguments.get("password", os.getenv("WP_PASSWORD", ""))
+                
+                # Create config
+                config = WordPressConfig(site_url=site_url, username=username, password=password)
+                
+                # Get authentication headers
+                headers = get_wp_auth(config)
+                
+                # Test connection by getting site info
+                info_url = f"{config.site_url}/wp-json"
+                response = requests.get(info_url, headers=headers)
                 
                 if response.status_code == 200:
-                    user_data = response.json()
                     resources.append(types.TextContent(
                         type="text",
-                        text=f"Connection successful!\n\nSite: {config.site_url}\nUser: {user_data.get('name')}\nRole: {', '.join(user_data.get('roles', []))}"
+                        text=f"Connection successful! WordPress site: {response.json().get('name', 'Unknown')}"
                     ))
                 else:
                     resources.append(types.TextContent(
                         type="text",
-                        text=f"Connection failed: {response.status_code} - {response.text}"
+                        text=f"Connection failed: {response.text}"
                     ))
+                
             except Exception as e:
                 resources.append(types.TextContent(
                     type="text",
