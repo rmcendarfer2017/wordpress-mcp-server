@@ -8,6 +8,7 @@ A Machine Communication Protocol (MCP) server that allows publishing content to 
 - Test WordPress connection
 - Create, retrieve, and manage WordPress categories and tags
 - Automatically handle category and tag creation when publishing
+- Support for featured images via URL or base64-encoded data
 - Works as both standalone FastAPI server and MCP server
 - Environment variable support for WordPress credentials
 
@@ -77,7 +78,42 @@ Example workflow:
 2. Get back the corresponding IDs
 3. Use those IDs with PUBLISH_ARTICLE to publish your content
 
-### Environment Variable Support
+## Featured Image Support
+
+The WordPress MCP Server now supports adding featured images to articles:
+
+### Using PUBLISH_ARTICLE with Images
+
+You can add a featured image to your article in two ways:
+
+1. **Via URL**: Provide an `image_url` parameter with a direct link to the image
+   ```
+   "image_url": "https://example.com/path/to/image.jpg"
+   ```
+
+2. **Via Base64**: Provide an `image_base64` parameter with the base64-encoded image data
+   ```
+   "image_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
+   ```
+
+3. **Custom Filename**: Optionally specify a filename for the uploaded image
+   ```
+   "image_filename": "my-custom-image-name.jpg"
+   ```
+
+The server will:
+- Download the image (if URL provided) or decode the base64 data
+- Upload the image to WordPress
+- Set it as the featured image for the article
+- Return the media ID in the response
+
+### Using the Standalone API
+
+When using the standalone API, you can provide a featured image either as:
+- A file upload using the `image` form field
+- A URL using the `image_url` form field
+
+## Environment Variable Support
 
 All tools now support using environment variables from your `.env` file as defaults:
 - `WP_SITE_URL` - Your WordPress site URL

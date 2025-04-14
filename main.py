@@ -68,19 +68,58 @@ def get_wp_auth(config: WordPressConfig):
     
     return {"Authorization": f"Basic {token}"}
 
-def upload_media_to_wordpress(image_data: bytes, filename: str, config: WordPressConfig):
-    """Upload media to WordPress and return the media ID"""
-    headers = get_wp_auth(config)
-    headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-    headers["Content-Type"] = "image/jpeg"  # Adjust based on file type if needed
+# Function to upload media to WordPress
+def upload_media_to_wordpress(image_data, filename, config):
+    """
+    Upload media to WordPress and return the media ID.
     
-    upload_url = f"{config.site_url}/wp-json/wp/v2/media"
-    response = requests.post(upload_url, data=image_data, headers=headers)
-    
-    if response.status_code not in (201, 200):
-        raise HTTPException(status_code=response.status_code, detail=f"Failed to upload media: {response.text}")
-    
-    return response.json().get("id")
+    Args:
+        image_data: The binary image data
+        filename: The filename of the image
+        config: WordPressConfig object with site_url, username, and password
+        
+    Returns:
+        The media ID if successful, None otherwise
+    """
+    try:
+        # Get authentication headers
+        headers = get_wp_auth(config)
+        
+        # Remove Content-Type from headers for media upload
+        upload_headers = headers.copy()
+        if "Content-Type" in upload_headers:
+            del upload_headers["Content-Type"]
+        
+        # Set the media upload headers
+        upload_headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        
+        # Determine content type based on file extension
+        content_type = "image/jpeg"  # Default
+        if filename.lower().endswith(".png"):
+            content_type = "image/png"
+        elif filename.lower().endswith(".gif"):
+            content_type = "image/gif"
+        elif filename.lower().endswith(".webp"):
+            content_type = "image/webp"
+            
+        upload_headers["Content-Type"] = content_type
+        
+        # Upload the media
+        upload_url = f"{config.site_url}/wp-json/wp/v2/media"
+        response = requests.post(
+            upload_url,
+            headers=upload_headers,
+            data=image_data
+        )
+        
+        if response.status_code in (201, 200):
+            return response.json().get("id")
+        else:
+            print(f"Failed to upload media: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"Error uploading media: {str(e)}")
+        return None
 
 # Routes
 @app.get("/")
@@ -198,7 +237,7 @@ async def test_connection():
     except Exception as e:
         return {"status": "error", "message": f"Connection error: {str(e)}"}
 
-@app.post("/publish", response_model=ArticleResponse)
+@app.post("/publish")
 async def publish_article(
     title: str = Form(...),
     content: str = Form(...),
@@ -207,29 +246,48 @@ async def publish_article(
     categories: str = Form("[]"),  # JSON string of category IDs
     tags: str = Form("[]"),  # JSON string of tag IDs
     image: Optional[UploadFile] = File(None),
+    image_url: Optional[str] = Form(None),
     site_url: str = Form(os.getenv("WP_SITE_URL", "")),
     username: str = Form(os.getenv("WP_USERNAME", "")),
     password: str = Form(os.getenv("WP_PASSWORD", "")),
 ):
     """
-    Publish an article to WordPress with optional image, categories, and tags
+    Publish an article to WordPress.
+    
+    You can provide categories and tags as JSON arrays of IDs.
+    You can provide a featured image either as a file upload or as a URL.
     """
-    # Parse inputs
+    # Parse categories and tags
     try:
         categories_list = json.loads(categories)
         tags_list = json.loads(tags)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON format for categories or tags")
     
-    # Set up WordPress connection
+    # Create config
     config = WordPressConfig(site_url=site_url, username=username, password=password)
     headers = get_wp_auth(config)
     
     # Upload image if provided
     featured_media_id = None
     if image:
-        image_data = await image.read()
-        featured_media_id = upload_media_to_wordpress(image_data, image.filename, config)
+        try:
+            image_data = await image.read()
+            featured_media_id = upload_media_to_wordpress(image_data, image.filename, config)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error uploading image: {str(e)}")
+    elif image_url:
+        try:
+            # Download image from URL
+            image_response = requests.get(image_url)
+            if image_response.status_code == 200:
+                image_data = image_response.content
+                filename = image_url.split("/")[-1] or "featured-image.jpg"
+                featured_media_id = upload_media_to_wordpress(image_data, filename, config)
+            else:
+                raise HTTPException(status_code=400, detail=f"Failed to download image from URL: {image_response.status_code}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error processing image URL: {str(e)}")
     
     # Create article payload
     article_data = {
@@ -247,7 +305,7 @@ async def publish_article(
     if featured_media_id:
         article_data["featured_media"] = featured_media_id
     
-    # Publish article with all data in a single request
+    # Publish article
     posts_url = f"{config.site_url}/wp-json/wp/v2/posts"
     response = requests.post(posts_url, headers=headers, json=article_data)
     
@@ -255,13 +313,14 @@ async def publish_article(
         raise HTTPException(status_code=response.status_code, detail=f"Failed to publish article: {response.text}")
     
     result = response.json()
-    edit_url = f"{config.site_url}/wp-admin/post.php?post={result.get('id')}&action=edit"
-    return ArticleResponse(
-        article_id=result.get("id"),
-        article_url=result.get("link", ""),
-        status=result.get("status", "unknown"),
-        edit_url=edit_url
-    )
+    return {
+        "success": True,
+        "id": result.get("id"),
+        "title": result.get("title", {}).get("rendered", title),
+        "link": result.get("link"),
+        "status": result.get("status"),
+        "featured_media": featured_media_id
+    }
 
 # MCP Server integration
 try:
@@ -305,6 +364,19 @@ try:
                             "type": "array",
                             "description": "List of tag IDs (integers). Use PREPARE_ARTICLE_METADATA to get IDs.",
                             "items": {"type": "integer"}
+                        },
+                        "image_url": {
+                            "type": "string", 
+                            "description": "URL of the image to use as featured image"
+                        },
+                        "image_base64": {
+                            "type": "string", 
+                            "description": "Base64-encoded image data to use as featured image (alternative to image_url)"
+                        },
+                        "image_filename": {
+                            "type": "string", 
+                            "description": "Filename to use for the uploaded image (default: 'featured-image.jpg')",
+                            "default": "featured-image.jpg"
                         },
                         "site_url": {"type": "string", "description": f"WordPress site URL (default: {os.getenv('WP_SITE_URL', '')})"},
                         "username": {"type": "string", "description": f"WordPress username (default: {os.getenv('WP_USERNAME', '')})"},
@@ -369,18 +441,68 @@ try:
                 username = arguments.get("username", os.getenv("WP_USERNAME", ""))
                 password = arguments.get("password", os.getenv("WP_PASSWORD", ""))
                 
+                # Image parameters
+                image_url = arguments.get("image_url")
+                image_base64 = arguments.get("image_base64")
+                image_filename = arguments.get("image_filename", "featured-image.jpg")
+                
                 # Create config
                 config = WordPressConfig(site_url=site_url, username=username, password=password)
                 
                 # Get authentication headers
                 headers = get_wp_auth(config)
                 
-                # Upload image if provided
+                # Process featured image if provided
                 featured_media_id = None
-                if "image" in arguments and arguments["image"]:
-                    image_data = arguments["image"]
-                    image_name = arguments.get("image_name", "image.jpg")
-                    featured_media_id = upload_media_to_wordpress(image_data, image_name, config)
+                
+                if image_url:
+                    try:
+                        # Download image from URL
+                        image_response = requests.get(image_url)
+                        if image_response.status_code == 200:
+                            image_data = image_response.content
+                            featured_media_id = upload_media_to_wordpress(image_data, image_filename, config)
+                            if featured_media_id:
+                                resources.append(types.TextContent(
+                                    type="text",
+                                    text=f"Successfully uploaded image from URL as featured image with ID {featured_media_id}"
+                                ))
+                            else:
+                                resources.append(types.TextContent(
+                                    type="text",
+                                    text=f"Failed to upload image from URL as featured image"
+                                ))
+                        else:
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Failed to download image from URL: {image_response.status_code}"
+                            ))
+                    except Exception as e:
+                        resources.append(types.TextContent(
+                            type="text",
+                            text=f"Error processing image URL: {str(e)}"
+                        ))
+                
+                elif image_base64:
+                    try:
+                        # Decode base64 image data
+                        image_data = base64.b64decode(image_base64)
+                        featured_media_id = upload_media_to_wordpress(image_data, image_filename, config)
+                        if featured_media_id:
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Successfully uploaded base64 image as featured image with ID {featured_media_id}"
+                            ))
+                        else:
+                            resources.append(types.TextContent(
+                                type="text",
+                                text=f"Failed to upload base64 image as featured image"
+                            ))
+                    except Exception as e:
+                        resources.append(types.TextContent(
+                            type="text",
+                            text=f"Error processing base64 image: {str(e)}"
+                        ))
                 
                 # Create article payload
                 article_data = {
